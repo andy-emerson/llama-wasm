@@ -12,26 +12,38 @@ VERIFIED before the slice runs.
 ## TL;DR
 
 A single-forward-pass proof of life is feasible, and its architecture is
-largely **forced by decisions already made** — escape Emscripten/COOP-COEP,
-"AOT the architecture, not the model," and keep custom finetunes swappable as
-data:
+largely **forced by decisions already made** (the durable statement is
+`design/strategy.md` — **AOT the architecture, not the model**; this doc is the
+feasibility grounding + go/no-go for its first slice):
 
-1. **JavaScript owns all asynchrony; wasm is pure compute; the GPU does the
-   math.** llama.cpp's WebGPU backend blocks in-band on GPU work (§3); we do not
-   port that C++ at all, so the blocking wall never appears. The driver `await`s
-   `queue.onSubmittedWorkDone()` / `buffer.mapAsync()` natively. [INFERRED from
-   §3; WEB on the blocking pattern]
-2. **WGSL compute shaders ported from `ggml-webgpu`'s templated quant kernels**,
-   not written from scratch — that port is the real engineering center. [WEB]
-3. **GGUF as the weight container**, parsed host-side, quantized blocks uploaded
-   raw. A finetune/adapter is data, not a recompile. [INFERRED]
-4. **A static, hand-written per-architecture dispatch schedule** for the slice.
-   The schedule *compiler* is deferred — we hand-write one schedule first,
-   exactly as Ruju hand-builds one IR fixture before building its producer.
-   [design decision]
+1. **AOT the architecture into a static dispatch schedule — this is the root.**
+   A transformer forward pass for a fixed architecture is a static compute
+   graph; we compile it ahead of time into a fixed list of dispatch records and
+   a JS driver plays it back. llama.cpp instead builds a graph at runtime and a
+   C++ backend *walks* it — and that walker is the component that blocks on GPU
+   sync (§3) and needs a C-API-over-JS bridge. **Removing the walker is what
+   removes both problems.** [INFERRED; strategy.md §"why this is the whole
+   ballgame"]
+2. **Therefore JavaScript owns all asynchrony; wasm is pure compute.** This is
+   the *consequence* of (1), not an independent choice: a dumb await-loop can
+   drive the GPU only because the schedule is static. The driver `await`s
+   `queue.onSubmittedWorkDone()` / `buffer.mapAsync()` natively; no blocking C++
+   is ported, so the blocking wall never appears. [INFERRED from §3; WEB on the
+   blocking pattern]
+3. **WGSL compute shaders ported from `ggml-webgpu`'s templated quant kernels**,
+   not written from scratch — we AOT the *schedule*, we *port* the kernels; that
+   port is the real engineering center. [WEB]
+4. **GGUF as the weight container**, parsed host-side, quantized blocks uploaded
+   raw into the schedule's named buffer slots. Per-*architecture*, not
+   per-model (vs WebLLM): a finetune/adapter is data, not a recompile. [INFERRED]
 5. **Rust compute leftovers → `wasm32-unknown-unknown`**, minimal self-defined
    ABI, offset-based buffers, never assuming sole ownership of linear memory
    (Ruju's `rj_` discipline). [decision]
+
+The slice **hand-writes one schedule** for one architecture+model — the AOT
+architecture is present from day one; only the schedule *generator* is deferred
+(strategy.md §"sequencing"), exactly as Ruju hand-builds one IR fixture before
+building its producer.
 
 **Thin slice (go/no-go):** the smallest real GGUF whose family we target, one
 quantization format, one forward pass: GGUF parse → upload to WebGPU buffers →
@@ -64,13 +76,16 @@ wllama remains the **working interim** behind LoveIDE's agent router and the
 ## 2. Why not just port llama.cpp's C++ (the design we set aside)
 
 The obvious "own build" is: compile llama.cpp to wasm without Emscripten, via
-wasi-sdk (`wasm32-wasi`). Rejected for proof-of-life because it inherits the
-blocking wall (§3) and, in the browser, needs a WASI polyfill — reintroducing a
-system-interface layer. It stays a *possible future* (it's what a `-wasi` name
-would imply); the AOT/JS-driver design below is what v0.1 pursues, and it's why
-the repo is `-wasm`, not `-wasi`. [INFERRED]
+wasi-sdk (`wasm32-wasi`). Rejected for proof-of-life because **porting the C++
+means porting the runtime graph-walker** — the very interpreter that blocks
+in-band on GPU sync (§3) — so it inherits the blocking wall, and in the browser
+also needs a WASI polyfill (a reintroduced system-interface layer). AOT-the-
+architecture (strategy.md) sidesteps this at the root: there is no walker to
+port because the graph is precompiled to a schedule. Porting the C++ stays a
+*possible future* (it's what a `-wasi` name would imply); it is not what v0.1
+pursues, and it's why the repo is `-wasm`, not `-wasi`. [INFERRED]
 
-## 3. The blocking wall, and why the JS-driver design dissolves it
+## 3. The blocking wall, and why removing the runtime walker dissolves it
 
 `ggml`'s WebGPU backend (`ggml/src/ggml-webgpu/ggml-webgpu.cpp` in llama.cpp
 mainline) is **~4,600 lines** of C++ against the standard `webgpu.h`/`webgpu_cpp.h`
@@ -85,8 +100,10 @@ instance.WaitAny( queue.OnSubmittedWorkDone(...), TIMEOUT );
 instance.WaitAny( buffer.MapAsync(...), TIMEOUT );
 ```
 
-Two layers make this hard to host in wasm, and both dissolve under ownership
-inversion:
+Two layers make this hard to host in wasm. Both dissolve for the same reason —
+**AOT precompiles the graph, so the runtime walker (this C++) is never in the
+loop to bridge or to block** (strategy.md); "ownership inversion to JS" is how
+that absence shows up in code:
 
 - **Layer 1 — the C-API-over-JS bridge.** In a browser, WebGPU *is*
   `navigator.gpu` (JS). A wasm module reaches it only through imports someone
@@ -103,10 +120,12 @@ inversion:
   habit. Remove the native runtime from the hot loop and there is nothing to
   block.
 
-So the emscripten dependency is really a *"who provides GPU-bridge + suspension"*
-dependency. The JS driver provides both for free; wasm is left with pure
-compute, which needs neither. [INFERRED — the load-bearing claim of the whole
-design; its proof is §7.]
+So the emscripten dependency is really a *"who runs the graph walker"*
+dependency: host the walker and you owe it a GPU bridge and a suspension
+mechanism. AOT deletes the walker — the schedule is data, the JS driver plays
+it back, wasm is left with pure compute that needs neither bridge nor
+suspension. [INFERRED — the load-bearing claim of the whole design; its proof
+is §7.]
 
 ## 4. What we build against (state of the pieces)
 

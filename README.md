@@ -31,19 +31,28 @@ COOP/COEP headers we're escaping).
 
 ## The approach
 
-Invert the ownership. **JavaScript owns all asynchrony; wasm is pure compute;
-the GPU does the heavy math.** The blocking problem doesn't get solved — it
-stops existing, because no blocking C++ is ported into wasm at all.
+**AOT the architecture, not the model.** A transformer forward pass for a fixed
+architecture is a *static* compute graph — the same ordered kernel dispatches
+every token. Compile it ahead of time into a fixed **dispatch schedule** and a
+plain JS driver plays it back. llama.cpp instead builds a graph at runtime and a
+C++ backend *walks* it — and that walker is the component that blocks on GPU
+sync and needs a C-API-over-JS bridge. **Delete the walker and both problems
+never appear.** So the blocking problem doesn't get solved — it stops existing.
+The full statement is [`design/strategy.md`](design/strategy.md); the rest
+follows from it:
 
-- A **plain-JS driver** issues WebGPU dispatches and `await`s every GPU sync
-  (`queue.onSubmittedWorkDone()`, `buffer.mapAsync()`) natively — the idiom
-  JavaScript is built for.
+- **JavaScript owns all asynchrony; wasm is pure compute** — the *consequence*
+  of AOT, not an independent choice. A **plain-JS driver** issues the schedule's
+  WebGPU dispatches and `await`s every GPU sync (`queue.onSubmittedWorkDone()`,
+  `buffer.mapAsync()`) natively — the idiom JavaScript is built for. A dumb
+  await-loop can be in charge only because the schedule is static.
 - The heavy matmuls run as **WGSL compute shaders**, ported from llama.cpp's
   `ggml-webgpu` templated quantization kernels (the real engineering center),
   not reinvented.
 - **GGUF is the weight container**, parsed host-side; quantized weights are
-  uploaded to GPU buffers as raw data. A new finetune or LoRA adapter is *data*,
-  never a recompile — the property WebLLM's per-model compile step gives up.
+  uploaded to the schedule's buffer slots as raw data. Because the schedule is
+  compiled per *architecture*, not per *model* (WebLLM's per-model compile is
+  its cage), a new finetune or LoRA adapter is *data*, never a recompile.
 - The compute leftovers (tokenizer, sampler, dequant helpers) are small, pure
   Rust compiled to **`wasm32-unknown-unknown`** — no system interface to shim,
   a minimal self-defined ABI, loaded as a plain ES module. (WASI is the right
@@ -77,6 +86,7 @@ imitate.
 
 | Path | What it is |
 | - | - |
+| `design/strategy.md` | the durable architectural thesis: AOT the architecture, not the model |
 | `design/methodology.md` | how work moves from written to pushed — the claim ladder and the increment loop |
 | `design/research/` | claim-labelled feasibility research and go/no-go experiment plans |
 

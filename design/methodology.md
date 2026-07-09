@@ -50,8 +50,9 @@ it.
 ## The increment loop
 
 1. **Pick from the frontier.** The human selects the increment and holds design
-   authority over scope. The current frontier is the proof-of-life forward pass
-   (`design/research/research-forward-pass.md`).
+   authority over scope. The durable direction is `design/strategy.md` (AOT the
+   architecture, not the model); the current frontier is the proof-of-life
+   forward pass that proves its spine (`design/research/research-forward-pass.md`).
 2. **Establish the oracle first.** Before writing a kernel or a pass, capture
    the llama.cpp CPU reference it must match — the dequantized tensor, the
    matmul output, the logits — as a checked-in fixture with the exact (model,
