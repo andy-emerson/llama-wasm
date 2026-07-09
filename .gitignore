@@ -1,0 +1,12 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# Model weights — large, downloaded/cached, never committed
+*.gguf
+
+# Node
+node_modules/
+
+# OS junk
+.DS_Store
